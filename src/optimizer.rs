@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::processor::ExtrusionPath;
 use glam::{Vec3, UVec3};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use rayon::prelude::*;
 use std::time::Instant;
 
@@ -9,14 +9,20 @@ use std::time::Instant;
 const VOXEL_EMPTY: u8 = 0;
 const VOXEL_OCCUPIED: u8 = 1;
 const VOXEL_EXTERNAL: u8 = 2;
+const VOXEL_VISIBLE_REGION: u8 = 3;
+
+// Bit Packing Constants
+const BITS_PER_VOXEL: usize = 2;
+const VOXELS_PER_WORD: usize = 64 / BITS_PER_VOXEL;
+const BIT_MASK: u64 = 0b11;
+
 
 struct VoxelGrid {
-    voxels: Vec<AtomicU8>,
+    voxels: Vec<AtomicU64>,
     dimensions: UVec3,
     min_bound: Vec3,
     voxel_size: f32,
     coverage_factor: f32,
-    visibility_radius_mult: f32,
 }
 
 impl VoxelGrid {
@@ -24,21 +30,22 @@ impl VoxelGrid {
         let start = Instant::now();
         
         // Add padding to ensure external flood fill can reach around
-        let padding = voxel_size * config.padding_factor();
+        let padding = voxel_size * config.padding_factor;
         let padded_min = min_bound - Vec3::splat(padding);
         let size = (max_bound - min_bound) + Vec3::splat(padding * 2.0);
         
         let dims = (size / voxel_size).ceil().as_uvec3();
         // Clamp dimensions to avoid extreme memory usage
-        let dims = dims.min(UVec3::splat(config.max_grid_dim()));
+        let dims = dims.min(UVec3::splat(config.max_grid_dim));
         
         // Use usize for total calculation to avoid u32 overflow
         let total_voxels = dims.x as usize * dims.y as usize * dims.z as usize;
+        let num_words = (total_voxels + VOXELS_PER_WORD - 1) / VOXELS_PER_WORD;
 
         // Parallel Initialization
-        let voxels: Vec<AtomicU8> = (0..total_voxels)
+        let voxels: Vec<AtomicU64> = (0..num_words)
             .into_par_iter()
-            .map(|_| AtomicU8::new(VOXEL_EMPTY))
+            .map(|_| AtomicU64::new(0))
             .collect();
 
         println!("  - Grid Init: {:.2?} ({} voxels)", start.elapsed(), total_voxels);
@@ -48,8 +55,7 @@ impl VoxelGrid {
             dimensions: dims,
             min_bound: padded_min,
             voxel_size,
-            coverage_factor: config.coverage_factor(),
-            visibility_radius_mult: config.visibility_radius_mult(),
+            coverage_factor: config.coverage_factor,
         }
     }
 
@@ -67,10 +73,16 @@ impl VoxelGrid {
         }
     }
 
-    fn get_index(&self, coord: UVec3) -> usize {
-        (coord.z as usize * self.dimensions.y as usize * self.dimensions.x as usize) + 
-        (coord.y as usize * self.dimensions.x as usize) + 
-        (coord.x as usize)
+    #[inline(always)]
+    fn get_index_unchecked(&self, x: u32, y: u32, z: u32) -> usize {
+        (z as usize * self.dimensions.y as usize * self.dimensions.x as usize) + 
+        (y as usize * self.dimensions.x as usize) + 
+        (x as usize)
+    }
+
+    #[inline(always)]
+    fn get_index_from_coord(&self, coord: UVec3) -> usize {
+        self.get_index_unchecked(coord.x, coord.y, coord.z)
     }
     
     fn coord_from_index(&self, idx: usize) -> UVec3 {
@@ -86,21 +98,85 @@ impl VoxelGrid {
     }
 
     fn get_voxel(&self, idx: usize) -> u8 {
-        self.voxels[idx].load(Ordering::Relaxed)
+        let word_idx = idx / VOXELS_PER_WORD;
+        let bit_offset = (idx % VOXELS_PER_WORD) * BITS_PER_VOXEL;
+        let word = self.voxels[word_idx].load(Ordering::Relaxed);
+        ((word >> bit_offset) & BIT_MASK) as u8
     }
     
     // Returns true if the state was updated from EMPTY to TARGET
     fn try_set_state(&self, idx: usize, target: u8) -> bool {
-        self.voxels[idx].compare_exchange(
-            VOXEL_EMPTY, 
-            target, 
-            Ordering::Relaxed, 
-            Ordering::Relaxed
-        ).is_ok()
+        let word_idx = idx / VOXELS_PER_WORD;
+        let bit_offset = (idx % VOXELS_PER_WORD) * BITS_PER_VOXEL;
+        let mask = BIT_MASK << bit_offset;
+        let target_bits = (target as u64) << bit_offset;
+        
+        let atom = &self.voxels[word_idx];
+        let mut old = atom.load(Ordering::Relaxed);
+        
+        loop {
+            let current_val = (old >> bit_offset) & BIT_MASK;
+            if current_val != VOXEL_EMPTY as u64 {
+                return false; // Already occupied or external
+            }
+            
+            let new = (old & !mask) | target_bits;
+            match atom.compare_exchange_weak(old, new, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return true,
+                Err(x) => old = x,
+            }
+        }
     }
     
+    #[inline]
     fn set_occupied(&self, idx: usize) {
-        self.voxels[idx].store(VOXEL_OCCUPIED, Ordering::Relaxed);
+        let word_idx = idx / VOXELS_PER_WORD;
+        let bit_offset = (idx % VOXELS_PER_WORD) * BITS_PER_VOXEL;
+        let bits = (VOXEL_OCCUPIED as u64) << bit_offset;
+        // fetch_or is atomic. We blindly set the bit. 
+        // Since VOXEL_OCCUPIED is 1, and EMPTY is 0, this transitions 0->1.
+        // It might conflict with EXTERNAL (2) which is 10 binary, resulting in 11 (3 -> Visible Region).
+        // BUT mark_occupied happens BEFORE flood fill, so only state is 0 or 1.
+        self.voxels[word_idx].fetch_or(bits, Ordering::Relaxed);
+    }
+    
+    // Safe setter that updates 2 (External) to 3 (Visible) or 0 to 3.
+    // Used in Dilation pass.
+    fn set_visible_region(&self, idx: usize) {
+         let word_idx = idx / VOXELS_PER_WORD;
+        let bit_offset = (idx % VOXELS_PER_WORD) * BITS_PER_VOXEL;
+        let mask = BIT_MASK << bit_offset;
+        let target_bits = (VOXEL_VISIBLE_REGION as u64) << bit_offset;
+        
+        let atom = &self.voxels[word_idx];
+        let mut old = atom.load(Ordering::Relaxed);
+        
+        loop {
+            // If already visible region, nothing to do
+            let current_val = (old >> bit_offset) & BIT_MASK;
+             if current_val == VOXEL_VISIBLE_REGION as u64 {
+                return;
+            }
+            
+            // If it's occupied (1), do NOT overwrite it?
+            // "Visible Region" means "Air near path".
+            // If it's occupied, it's the path itself.
+            // We want to mark EMPTY or EXTERNAL as VISIBLE_REGION?
+            // Actually, we usually want to know if a path node is *inside* a Visible Region.
+            // If the voxel at path node is Occupied, that's fine. 
+            // We need to check if it's *near* External.
+            // So we are marking the Air.
+            // If we overwrite Occupied, we lose the path info?
+            // Actually, `filter_paths` only checks if the path's location is in a "Visible" zone.
+            // If we mark the path voxels themselves as Visible Region, that's fine too.
+            // But let's assume we proceed:
+            
+            let new = (old & !mask) | target_bits;
+            match atom.compare_exchange_weak(old, new, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return,
+                Err(x) => old = x,
+            }
+        }
     }
 
     /// Mark occupied voxels - uses volumetric rasterization
@@ -111,79 +187,93 @@ impl VoxelGrid {
         let dim_y = self.dimensions.y as usize;
         let stride_z = dim_x * dim_y;
         
-        paths.par_iter().for_each(|path| {
-            if path.nodes.len() < 2 { return; }
+        // Use chunks to reduce the overhead of parallel scheduling for small tasks
+        // Sorting paths beforehand (spatial locality) makes this extremely cache efficient
+        paths.par_chunks(64).for_each(|chunk| {
+            for path in chunk {
+                if path.nodes.len() < 2 { continue; }
 
-            for i in 0..path.nodes.len() - 1 {
-                let p1 = path.nodes[i].pos;
-                let p2 = path.nodes[i+1].pos;
-                
-                // Use the max width of the segment for radius
-                let width = path.nodes[i].width.max(path.nodes[i+1].width);
-                let height = path.nodes[i].height.max(path.nodes[i+1].height);
-                
-                // Radius for rasterization: width/2 + conservative voxel coverage
-                let radius = width * 0.5 + self.voxel_size * self.coverage_factor; 
-                let vertical_radius = height * 0.5 + self.voxel_size * self.coverage_factor;
-                let radius_sq = radius * radius;
-                
-                // Bounding box of the segment expanded by radius
-                let seg_min = p1.min(p2) - Vec3::new(radius, radius, vertical_radius);
-                let seg_max = p1.max(p2) + Vec3::new(radius, radius, vertical_radius);
-                
-                // Convert to grid bounds
-                let start_idx = match self.world_to_grid(seg_min) {
-                    Some(idx) => idx,
-                    None => UVec3::ZERO, 
-                };
-                
-                let end_idx = match self.world_to_grid(seg_max) {
-                    Some(idx) => idx,
-                    None => self.dimensions - UVec3::ONE, 
-                };
-
-                // Precompute XY projection of the segment
-                let p1_xy = Vec3::new(p1.x, p1.y, 0.0);
-                let p2_xy = Vec3::new(p2.x, p2.y, 0.0);
-                let segment_vec = p2_xy - p1_xy;
-                let l2 = segment_vec.length_squared();
-                let inv_l2 = if l2 == 0.0 { 0.0 } else { 1.0 / l2 };
-
-                // Iterate over the bounding box
-                for z in start_idx.z..=end_idx.z {
-                    let voxel_z = self.min_bound.z + z as f32 * self.voxel_size + self.voxel_size * 0.5;
-                    let base_idx_z = (z as usize) * stride_z;
+                for i in 0..path.nodes.len() - 1 {
+                    let p1 = path.nodes[i].pos;
+                    let p2 = path.nodes[i+1].pos;
                     
-                    for y in start_idx.y..=end_idx.y {
-                        let voxel_y = self.min_bound.y + y as f32 * self.voxel_size + self.voxel_size * 0.5;
-                        let base_idx_y = base_idx_z + (y as usize) * dim_x;
-                        
-                        for x in start_idx.x..=end_idx.x {
-                            let idx = base_idx_y + (x as usize);
-                            
-                            // Optimization: Check before writing to reduce cache coherence traffic
-                            if self.get_voxel(idx) == VOXEL_OCCUPIED {
-                                continue;
-                            }
+                    let width = path.nodes[i].width.max(path.nodes[i+1].width);
+                    let height = path.nodes[i].height.max(path.nodes[i+1].height);
+                    
+                    // Radius logic
+                    let radius = width * 0.5 + self.voxel_size * self.coverage_factor; 
+                    let vertical_radius = height * 0.5 + self.voxel_size * self.coverage_factor;
+                    
+                    // Precompute segment math
+                    // let p1_xy = p1; // Unused
+                    
+                    let min_p = p1.min(p2) - Vec3::new(radius, radius, vertical_radius);
+                    let max_p = p1.max(p2) + Vec3::new(radius, radius, vertical_radius);
 
-                            // Calculate voxel center X
-                            let voxel_x = self.min_bound.x + x as f32 * self.voxel_size + self.voxel_size * 0.5;
-                            let center_xy = Vec3::new(voxel_x, voxel_y, 0.0);
+                    // Grid bounds
+                    let start_idx = match self.world_to_grid(min_p) {
+                         Some(idx) => idx, None => UVec3::ZERO
+                    };
+                    let end_idx = match self.world_to_grid(max_p) {
+                        Some(idx) => idx, None => self.dimensions - UVec3::ONE
+                    };
+
+                    // Optimizing the loop:
+                    // For each Z and Y, we want to find the range of X that satisfies distance check.
+                    
+                    // Segment vector
+                    let seg = p2 - p1;
+                    let seg_len_sq = seg.length_squared();
+                    let inv_seg_len_sq = if seg_len_sq > 0.0 { 1.0 / seg_len_sq } else { 0.0 };
+
+                    for z in start_idx.z..=end_idx.z {
+                        let voxel_z = self.min_bound.z + z as f32 * self.voxel_size + self.voxel_size * 0.5;
+                        let base_z = (z as usize) * stride_z;
+                        
+                        // Z distance check (simple AABB prune first, but precise later)
+                        // Actually, distance to segment is 3D.
+                        // Let's stick to the separation of XY and Z for "Prism with rounded ends" shape?
+                        // The original code treated it as specialized extrusion shape: 
+                        // "Capsule in XY" vs "Rectangle in Z"? 
+                        // Original code: dist_xy_sq <= radius_sq AND dist_z <= vertical_radius.
+                        // This approximates the flattened extruded line.
+                        
+                        for y in start_idx.y..=end_idx.y {
+                            let voxel_y = self.min_bound.y + y as f32 * self.voxel_size + self.voxel_size * 0.5;
+                            let base_y = base_z + (y as usize) * dim_x;
                             
-                            // Distance check
-                            let t = (center_xy - p1_xy).dot(segment_vec) * inv_l2;
-                            let t_clamped = t.clamp(0.0, 1.0);
-                            let closest_xy = p1_xy + segment_vec * t_clamped;
+                            // To Optimize X:
+                            // We need `dist_xy_sq( (x, y), segment_xy ) <= radius_sq`.
+                            // This defines a range of X values.
+                            // Solving for X is hard because `t` (closest point param) depends on X.
+                            // But we can check bounds.
                             
-                            let dist_xy_sq = center_xy.distance_squared(closest_xy);
-                            
-                            if dist_xy_sq <= radius_sq {
-                                // Check Z height
-                                let closest_z = p1.z + (p2.z - p1.z) * t_clamped;
-                                let dist_z = (voxel_z - closest_z).abs();
+                            // Fallback to "Check every X in box" but optimized math
+                            for x in start_idx.x..=end_idx.x {
+                                let idx = base_y + (x as usize);
                                 
-                                if dist_z <= vertical_radius {
-                                    self.set_occupied(idx);
+                                // Peek first
+                                if self.get_voxel(idx) == VOXEL_OCCUPIED { continue; }
+                                
+                                let voxel_x = self.min_bound.x + x as f32 * self.voxel_size + self.voxel_size * 0.5;
+                                let voxel_pos = Vec3::new(voxel_x, voxel_y, voxel_z);
+                                
+                                // Distance to finite line segment
+                                let t = (voxel_pos - p1).dot(seg) * inv_seg_len_sq;
+                                let t_clamped = t.clamp(0.0, 1.0);
+                                let closest = p1 + seg * t_clamped;
+                                
+                                // We are using separate radius for Z and XY in original code.
+                                // Let's replicate logic:
+                                let closest_xy = Vec3::new(closest.x, closest.y, 0.0);
+                                let voxel_xy = Vec3::new(voxel_x, voxel_y, 0.0);
+                                let dist_xy_sq = voxel_xy.distance_squared(closest_xy);
+                                
+                                if dist_xy_sq <= radius * radius {
+                                    let dist_z = (voxel_z - closest.z).abs();
+                                    if dist_z <= vertical_radius {
+                                        self.set_occupied(idx);
+                                    }
                                 }
                             }
                         }
@@ -197,173 +287,199 @@ impl VoxelGrid {
     fn flood_fill_external(&self) {
         let start = Instant::now();
         
-        // Pre-allocate frontier with estimated capacity for all 6 faces
-        let estimated_frontier_size = ((self.dimensions.x * self.dimensions.y * 2 + 
-                                        self.dimensions.y * self.dimensions.z * 2 + 
-                                        self.dimensions.x * self.dimensions.z * 2) as usize).min(1_000_000);
-        let mut frontier = Vec::with_capacity(estimated_frontier_size);
+        // Estimate frontier size
+        let estimated_size = (self.dimensions.x * self.dimensions.y * 2) as usize;
+        let mut frontier = Vec::with_capacity(estimated_size);
         
-        // Parallel seeding: Process each face's rows in parallel
-        // X-faces (YZ planes at x=0 and x=max)
-        let x_seeds: Vec<usize> = (0..self.dimensions.z).into_par_iter().flat_map(|z| {
-            let mut local = Vec::new();
-            for y in 0..self.dimensions.y {
-                let idx0 = self.get_index(UVec3::new(0, y, z));
-                let idx1 = self.get_index(UVec3::new(self.dimensions.x - 1, y, z));
-                if self.try_set_state(idx0, VOXEL_EXTERNAL) { local.push(idx0); }
-                if self.try_set_state(idx1, VOXEL_EXTERNAL) { local.push(idx1); }
+        // 1. Seed External from Faces
+        // Using explicit loop for seeds is fast enough
+        let dim = self.dimensions;
+        
+        // Function to process seed
+        let check_and_push = |idx: usize, list: &mut Vec<usize>| {
+            if self.try_set_state(idx, VOXEL_EXTERNAL) {
+                list.push(idx);
             }
-            local
-        }).collect();
-        
-        // Y-faces (XZ planes at y=0 and y=max)
-        let y_seeds: Vec<usize> = (0..self.dimensions.z).into_par_iter().flat_map(|z| {
-            let mut local = Vec::new();
-            for x in 0..self.dimensions.x {
-                let idx0 = self.get_index(UVec3::new(x, 0, z));
-                let idx1 = self.get_index(UVec3::new(x, self.dimensions.y - 1, z));
-                if self.try_set_state(idx0, VOXEL_EXTERNAL) { local.push(idx0); }
-                if self.try_set_state(idx1, VOXEL_EXTERNAL) { local.push(idx1); }
-            }
-            local
-        }).collect();
-        
-        // Z-faces (XY planes at z=0 and z=max)
-        let z_seeds: Vec<usize> = (0..self.dimensions.y).into_par_iter().flat_map(|y| {
-            let mut local = Vec::new();
-            for x in 0..self.dimensions.x {
-                let idx0 = self.get_index(UVec3::new(x, y, 0));
-                let idx1 = self.get_index(UVec3::new(x, y, self.dimensions.z - 1));
-                if self.try_set_state(idx0, VOXEL_EXTERNAL) { local.push(idx0); }
-                if self.try_set_state(idx1, VOXEL_EXTERNAL) { local.push(idx1); }
-            }
-            local
-        }).collect();
-        
-        // Merge all seeds
-        frontier.extend(x_seeds);
-        frontier.extend(y_seeds);
-        frontier.extend(z_seeds);
-        
-        println!("    > Initial seeds: {}", frontier.len());
+        };
 
-        // Helper to get neighbor indices
+        // Gather seeds in parallel stripes
+        let seeds: Vec<usize> = (0..dim.z).into_par_iter().map(|z| {
+            let mut local_seeds = Vec::new();
+            for y in 0..dim.y {
+                check_and_push(self.get_index_unchecked(0, y, z), &mut local_seeds);
+                check_and_push(self.get_index_unchecked(dim.x-1, y, z), &mut local_seeds);
+            }
+            for x in 1..dim.x-1 {
+                check_and_push(self.get_index_unchecked(x, 0, z), &mut local_seeds);
+                check_and_push(self.get_index_unchecked(x, dim.y-1, z), &mut local_seeds);
+            }
+            local_seeds
+        }).flatten().collect();
         
+        frontier.extend(seeds);
+        // Add Top/Bottom faces
+        for y in 0..dim.y {
+            for x in 0..dim.x {
+                check_and_push(self.get_index_unchecked(x, y, 0), &mut frontier);
+                check_and_push(self.get_index_unchecked(x, y, dim.z-1), &mut frontier);
+            }
+        }
+
+        println!("    > Initial seeds: {}", frontier.len());
+        
+        // BFS
         let stride_x = 1usize;
         let stride_y = self.dimensions.x as usize;
-        let stride_z = (self.dimensions.x * self.dimensions.y) as usize;
+        let stride_z = stride_y * self.dimensions.y as usize;
         
-        let dim_x = self.dimensions.x as i32;
-        let dim_y = self.dimensions.y as i32;
-        let dim_z = self.dimensions.z as i32;
-
-
-
-        // Parallel Frontier BFS
         while !frontier.is_empty() {
-            // Map current frontier to next frontier in parallel
             let next_frontier: Vec<usize> = frontier.par_iter().map(|&idx| {
-                let coord = self.coord_from_index(idx); // cost of calc
-                let mut local_next = Vec::new();
-                
-                let cur_x = coord.x as i32;
-                let cur_y = coord.y as i32;
-                let cur_z = coord.z as i32;
-
-                // Check 6 neighbors
-                // Manually unrolled for explicit checks
-                
-                // X-
-                if cur_x > 0 {
-                    let n_idx = idx - stride_x;
-                    if self.try_set_state(n_idx, VOXEL_EXTERNAL) { local_next.push(n_idx); }
-                }
-                // X+
-                if cur_x < dim_x - 1 {
-                    let n_idx = idx + stride_x;
-                    if self.try_set_state(n_idx, VOXEL_EXTERNAL) { local_next.push(n_idx); }
-                }
-                
-                // Y-
-                if cur_y > 0 {
-                    let n_idx = idx - stride_y;
-                     if self.try_set_state(n_idx, VOXEL_EXTERNAL) { local_next.push(n_idx); }
-                }
-                // Y+
-                if cur_y < dim_y - 1 {
-                    let n_idx = idx + stride_y;
-                     if self.try_set_state(n_idx, VOXEL_EXTERNAL) { local_next.push(n_idx); }
-                }
-                
-                // Z-
-                if cur_z > 0 {
-                    let n_idx = idx - stride_z;
-                     if self.try_set_state(n_idx, VOXEL_EXTERNAL) { local_next.push(n_idx); }
-                }
-                // Z+
-                if cur_z < dim_z - 1 {
-                    let n_idx = idx + stride_z;
-                     if self.try_set_state(n_idx, VOXEL_EXTERNAL) { local_next.push(n_idx); }
-                }
-
-                local_next
-            })
-            .flatten()
-            .collect();
+                 let mut local = Vec::new();
+                 // Optimize: Don't decode coord if possible. Check bounds using remainder? 
+                 // Cost of coord_from_index is division, which is slow.
+                 // We can simply check neighbors if safe.
+                 
+                 let coord = self.coord_from_index(idx); // Still safer for boundary checks
+                 
+                 if coord.x > 0 { 
+                     let n = idx - stride_x; 
+                     if self.try_set_state(n, VOXEL_EXTERNAL) { local.push(n); } 
+                 }
+                 if coord.x < dim.x - 1 { 
+                     let n = idx + stride_x; 
+                     if self.try_set_state(n, VOXEL_EXTERNAL) { local.push(n); } 
+                 }
+                 
+                 if coord.y > 0 { 
+                     let n = idx - stride_y; 
+                     if self.try_set_state(n, VOXEL_EXTERNAL) { local.push(n); } 
+                 }
+                 if coord.y < dim.y - 1 { 
+                     let n = idx + stride_y; 
+                     if self.try_set_state(n, VOXEL_EXTERNAL) { local.push(n); } 
+                 }
+                 
+                 if coord.z > 0 { 
+                     let n = idx - stride_z; 
+                     if self.try_set_state(n, VOXEL_EXTERNAL) { local.push(n); } 
+                 }
+                 if coord.z < dim.z - 1 { 
+                     let n = idx + stride_z; 
+                     if self.try_set_state(n, VOXEL_EXTERNAL) { local.push(n); } 
+                 }
+                 
+                 local
+            }).flatten().collect();
             
             frontier = next_frontier;
         }
 
         println!("  - Flood Fill: {:.2?}", start.elapsed());
     }
+    
+    // Dilate the External Region to create "Visible Region"
+    // This effectively marks any voxel within Radius of Air as Visible.
+    fn dilate_visible_region(&self, radius_voxels: i32) {
+        if radius_voxels <= 0 { return; }
+        let start = Instant::now();
+        
+        let dim = self.dimensions;
+        let stride_y = dim.x as usize;
+        let stride_z = stride_y * dim.y as usize;
 
-    /// Check visibility with 2x extrusion width radius expansion
-    /// A path is visible if any voxel within 2x width/height distance is External
-    fn is_visible_with_radius(&self, pos: Vec3, width: f32, height: f32) -> bool {
-        if let Some(coord) = self.world_to_grid(pos) {
-            // Use 1x extrusion dimensions for visibility check radius
-            let check_radius = (width.max(height) * self.visibility_radius_mult / self.voxel_size).ceil() as i32;
-            let check_radius = check_radius.max(1); // At least 1 voxel
-            
-            let dim_x = self.dimensions.x as i32;
-            let dim_y = self.dimensions.y as i32;
-            let dim_z = self.dimensions.z as i32;
-
-            let start_x = (coord.x as i32 - check_radius).max(0);
-            let end_x = (coord.x as i32 + check_radius).min(dim_x - 1);
-            
-            let start_y = (coord.y as i32 - check_radius).max(0);
-            let end_y = (coord.y as i32 + check_radius).min(dim_y - 1);
-            
-            let start_z = (coord.z as i32 - check_radius).max(0);
-            let end_z = (coord.z as i32 + check_radius).min(dim_z - 1);
-
-            let stride_y = self.dimensions.x as usize;
-            let stride_z = (self.dimensions.x * self.dimensions.y) as usize;
-
-            // SIMD-friendly row-based iteration with early exit
-            for z in start_z..=end_z {
-                let base_z = (z as usize) * stride_z;
-                for y in start_y..=end_y {
-                    let base_y = base_z + (y as usize) * stride_y;
-                    let row_start = base_y + (start_x as usize);
-                    let row_end = base_y + (end_x as usize) + 1;
-                    
-                    // Check entire row at once - enables vectorization
-                    if self.voxels[row_start..row_end].iter().any(|v| v.load(Ordering::Relaxed) == VOXEL_EXTERNAL) {
-                        return true;
-                    }
+        // Naive dilation is expensive (iterate all voxels, check neighbors).
+        // Better: Iterate only EXTERNAL voxels and mark their neighbors.
+        // Even better: Use the BFS approach again! 
+        // Seed with all External voxels.
+        // Run BFS for K steps.
+        
+        // But we already have the External voxels.
+        // And we don't store "Frontier of External".
+        // Re-scanning grid to find External frontier is fast.
+        
+        // 1. Find all External voxels that border Non-External (Occupied or Empty)
+        // Actually, just find ALL External voxels (state=2) and use as seeds.
+        // Since we want to mark Empty/Occupied as Visible.
+        
+        // Let's assume we just want to expand "External".
+        // Any voxel reachable from External within K steps => Visible Region.
+        
+        // Collect all External voxels? That's huge.
+        // But we only need the *boundary* of External region.
+        // We can scan array.
+        
+        let frontier: Vec<usize> = (0..self.voxels.len() * VOXELS_PER_WORD).into_par_iter()
+            .filter_map(|idx| {
+                if self.get_voxel(idx) == VOXEL_EXTERNAL {
+                    Some(idx)
+                } else {
+                    None
                 }
-            }
+            }).collect();
+            
+        // Optimization: Use a bitset for "Visited" or just rely on state change?
+        // We want to change value to 3 (Visible). 
+        // External (2) is already "Visible". We can leave it as 2.
+        // We only change 0 or 1 to 3.
+        
+        // If we start with all External, we can BFS.
+        // Depth-limited BFS.
+        let mut next_frontier = frontier;
+        
+        for _step in 0..radius_voxels {
+            if next_frontier.is_empty() { break; }
+            
+            next_frontier = next_frontier.par_iter().map(|&idx| {
+                 let coord = self.coord_from_index(idx);
+                 let mut local = Vec::new();
+                 
+                 let neighbors = [
+                    if coord.x > 0 { Some(idx - 1) } else { None },
+                    if coord.x < dim.x - 1 { Some(idx + 1) } else { None },
+                    if coord.y > 0 { Some(idx - stride_y) } else { None },
+                    if coord.y < dim.y - 1 { Some(idx + stride_y) } else { None },
+                    if coord.z > 0 { Some(idx - stride_z) } else { None },
+                    if coord.z < dim.z - 1 { Some(idx + stride_z) } else { None },
+                 ];
+                 
+                 for n_opt in neighbors {
+                     if let Some(n_idx) = n_opt {
+                         let val = self.get_voxel(n_idx);
+                         if val != VOXEL_EXTERNAL && val != VOXEL_VISIBLE_REGION {
+                             // Mark this as visible
+                             // We use a CAS loop similar to try_set_state but for Visible
+                             // We don't care about return value, just try.
+                             self.set_visible_region(n_idx);
+                             local.push(n_idx);
+                         }
+                     }
+                 }
+                 local
+            }).flatten().collect();
         }
-        false
+        
+        println!("  - Dilation: {:.2?}", start.elapsed());
     }
 }
 
-pub fn optimize_paths(paths: Vec<ExtrusionPath>, config: &Config) -> Vec<ExtrusionPath> {
+pub fn optimize_paths(mut paths: Vec<ExtrusionPath>, config: &Config) -> Vec<ExtrusionPath> {
     if paths.is_empty() {
         return paths;
     }
+
+    // 0. Spatial Sorting to improve cache locality
+    // Z-curve or just coordinate sort. Simple X/Y/Z sort is very effective.
+    let start_sort = Instant::now();
+    paths.par_sort_unstable_by(|a, b| {
+        let p1 = if a.nodes.is_empty() { Vec3::ZERO } else { a.nodes[0].pos };
+        let p2 = if b.nodes.is_empty() { Vec3::ZERO } else { b.nodes[0].pos };
+        
+        // Sort by Z (layer), then Y, then X
+        p1.z.partial_cmp(&p2.z).unwrap_or(std::cmp::Ordering::Equal)
+            .then(p1.y.partial_cmp(&p2.y).unwrap_or(std::cmp::Ordering::Equal))
+            .then(p1.x.partial_cmp(&p2.x).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    println!("  - Sort Paths: {:.2?}", start_sort.elapsed());
 
     // 1. Calculate Bounds (Parallel Reduction)
     let (min_bound, max_bound) = paths.par_iter()
@@ -379,8 +495,7 @@ pub fn optimize_paths(paths: Vec<ExtrusionPath>, config: &Config) -> Vec<Extrusi
         );
 
     // 2. Init Voxel Grid with FINER resolution
-    // Using half the nozzle diameter for better accuracy
-    let voxel_size = config.voxel_size() * config.voxel_size_modifier();
+    let voxel_size = config.voxel_size();
     let grid = VoxelGrid::new(min_bound, max_bound, voxel_size, config);
 
     // 3. Mark Occupied (Parallel)
@@ -388,26 +503,38 @@ pub fn optimize_paths(paths: Vec<ExtrusionPath>, config: &Config) -> Vec<Extrusi
 
     // 4. Flood Fill External (Parallel BFS)
     grid.flood_fill_external();
+    
+    // 4b. Dilate External Region
+    // Calculate dilation radius in voxels
+    // We want to cover "visibility_radius_mult * width"
+    // Approximate average width or use conservative max
+    let avg_width = config.nozzle_diameter; // Approximation
+    let check_radius = (avg_width * config.visibility_radius_mult / voxel_size).ceil() as i32;
+    grid.dilate_visible_region(check_radius);
 
     // 5. Filter Paths (Parallel)
     let start_filter = Instant::now();
-    // Keep path if ANY node is within 2x extrusion width of External air
+    // Keep path if ANY node is in VOXEL_VISIBLE_REGION or VOXEL_EXTERNAL
     let result = paths.into_par_iter().filter(|path| {
-        // Check all nodes with 2x radius visibility
+        // Fast check: Check sampled points
         for node in &path.nodes {
-            if grid.is_visible_with_radius(node.pos, node.width, node.height) {
-                return true; 
+            if let Some(idx) = grid.world_to_grid(node.pos).map(|uv| grid.get_index_from_coord(uv)) {
+                let v = grid.get_voxel(idx);
+                if v == VOXEL_EXTERNAL || v == VOXEL_VISIBLE_REGION {
+                    return true;
+                }
             }
         }
         
-        // Also check segment midpoints for long segments
+        // Check midpoints for finer granularity
         if path.nodes.len() > 1 {
             for i in 0..path.nodes.len() - 1 {
                 let midpoint = (path.nodes[i].pos + path.nodes[i+1].pos) * 0.5;
-                let avg_width = (path.nodes[i].width + path.nodes[i+1].width) * 0.5;
-                let avg_height = (path.nodes[i].height + path.nodes[i+1].height) * 0.5;
-                if grid.is_visible_with_radius(midpoint, avg_width, avg_height) {
-                    return true;
+                if let Some(idx) = grid.world_to_grid(midpoint).map(|uv| grid.get_index_from_coord(uv)) {
+                    let v = grid.get_voxel(idx);
+                    if v == VOXEL_EXTERNAL || v == VOXEL_VISIBLE_REGION {
+                        return true;
+                    }
                 }
             }
         }
@@ -428,7 +555,6 @@ mod tests {
 
     #[test]
     fn test_internal_culling() {
-        // Create a dense block of paths that forms a solid interior
         let config = Config::default();
         let mut paths = Vec::new();
         let gap = 0.3;
@@ -467,23 +593,19 @@ mod tests {
     
     #[test]
     fn test_surface_paths_preserved() {
-        // Create a hollow shell - all paths should be kept
         let config = Config::default();
         let mut paths = Vec::new();
         let gap = 0.4;
         let size = 5;
         
-        // Only create paths on the surface faces
         for x in 0..size {
             for y in 0..size {
-                // Bottom face (z=0)
                 paths.push(ExtrusionPath {
                     nodes: vec![
                         PathNode { pos: Vec3::new(x as f32 * gap, y as f32 * gap, 0.0), width: 0.4, height: 0.2 },
                         PathNode { pos: Vec3::new(x as f32 * gap + gap, y as f32 * gap, 0.0), width: 0.4, height: 0.2 },
                     ]
                 });
-                // Top face
                 paths.push(ExtrusionPath {
                     nodes: vec![
                         PathNode { pos: Vec3::new(x as f32 * gap, y as f32 * gap, size as f32 * gap), width: 0.4, height: 0.2 },
@@ -499,7 +621,6 @@ mod tests {
         
         println!("Surface test: {} -> {}", initial_count, final_count);
         
-        // All surface paths should be preserved
         assert_eq!(final_count, initial_count);
     }
 }

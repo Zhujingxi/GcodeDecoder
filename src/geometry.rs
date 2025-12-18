@@ -13,7 +13,7 @@ pub struct Triangle {
 }
 
 pub fn generate_mesh(paths: &[ExtrusionPath], config: &Config) -> Vec<Triangle> {
-    let num_sides = config.num_sides(); // From quality preset
+    let num_sides = config.mesh_sides; // From quality preset
     
     // Precompute unit circle (Cos, Sin) table
     let unit_circle: Vec<(f32, f32)> = (0..num_sides)
@@ -59,7 +59,7 @@ pub fn generate_mesh(paths: &[ExtrusionPath], config: &Config) -> Vec<Triangle> 
                 let dir_next = (path.nodes[i+1].pos - current).normalize();
                 
                 let sum = dir_prev + dir_next;
-                if sum.length_squared() < config.direction_epsilon() {
+                if sum.length_squared() < config.direction_epsilon {
                     dir = dir_prev;
                 } else {
                     dir = sum.normalize();
@@ -68,7 +68,7 @@ pub fn generate_mesh(paths: &[ExtrusionPath], config: &Config) -> Vec<Triangle> 
             
             // Define Frame
             let up = Vec3::Z;
-            let safe_up = if dir.abs_diff_eq(Vec3::Z, config.up_vector_epsilon()) || dir.abs_diff_eq(Vec3::NEG_Z, config.up_vector_epsilon()) {
+            let safe_up = if dir.abs_diff_eq(Vec3::Z, config.up_vector_epsilon) || dir.abs_diff_eq(Vec3::NEG_Z, config.up_vector_epsilon) {
                 Vec3::X
             } else {
                 up

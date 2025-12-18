@@ -1,91 +1,102 @@
 # GcodeDecoder
 
-A high-performance G-code to STL converter written in Rust. Converts 3D printer G-code files into accurate 3D mesh representations of the extruded filament paths.
+GcodeDecoder is a high-performance Rust tool that converts 3D printer G-code into 3D mesh geometry (STL). It effectively visualizes the extruded filament path, making it useful for verifying slice data, identifying potential print issues, or creating realistic previews.
 
 ## Features
 
-- **Accurate Geometry** - Creates tube meshes representing actual filament extrusion paths
-- **Volumetric Calculation** - Dynamically calculates line width from extrusion amount
-- **Mesh Optimization** - Optional internal path culling for smaller files
-- **WASM Support** - Can be compiled to WebAssembly for browser use
-- **Fully Configurable** - All parameters adapt to your printer setup
+- **High Fidelity**: Generates accurate "pillar-like" geometry for every extrusion segment, handling corners and line widths correctly based on volumetric physics.
+- **Optimization**: Optional internal path culling to remove geometry that isn't visible from the outside. This significantly reduces mesh complexity and file size while maintaining visual accuracy.
+- **Performance**: Built with Rust and `rayon` for multi-threaded processing, ensuring fast conversion speeds even for large G-code files.
+- **WASM Support**: Designed to compile to WebAssembly for client-side web usage.
+- **Configurable**: Fully customizable printer parameters including nozzle diameter, layer height, filament diameter, and mesh resolution.
 
 ## Installation
 
-```bash
-cargo build --release
-```
+Ensure you have [Rust](https://www.rust-lang.org/tools/install) installed.
+
+1.  Clone the repository:
+    ```bash
+    git clone https://github.com/yourusername/gcodedecoder.git
+    cd gcodedecoder
+    ```
+
+2.  Build the project:
+    ```bash
+    cargo build --release
+    ```
 
 ## Usage
 
-### Basic
+### CLI
+
+Run the tool using `cargo run`. The basic syntax is:
 
 ```bash
-gcodedecoder input.gcode                    # Outputs input.stl
-gcodedecoder input.gcode -o output.stl      # Custom output path
-gcodedecoder input.gcode --optimize         # Remove internal paths
+cargo run --release -- <input_file> [options]
+```
+
+#### Examples
+
+**Basic Conversion:**
+Convert `test.gcode` to `test.stl` (default output name):
+```bash
+cargo run --release -- ./test.gcode
+```
+
+**Specify Output File:**
+```bash
+cargo run --release -- ./test.gcode --output ./output_model.stl
+```
+
+**With Optimization (Remove Internal Paths):**
+This will analyze the mesh and remove voxels/paths that are completely occluded by outer shells.
+```bash
+cargo run --release -- ./test.gcode --optimize
+```
+
+**Custom Printer Settings:**
+Adjust parameters to match your slicer settings for the most accurate result:
+```bash
+cargo run --release -- ./test.gcode \
+  --nozzle-diameter 0.6 \
+  --layer-height 0.3 \
+  --filament-diameter 1.75 \
+  --mesh-sides 16
 ```
 
 ### Configuration Options
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--nozzle-diameter` | 0.4 | Nozzle diameter in mm |
-| `--layer-height` | 0.2 | Layer height in mm |
-| `--filament-diameter` | 1.75 | Filament diameter in mm |
-| `--mesh-sides` | 8 | Tube resolution (4=low, 8=medium, 16=high) |
-| `--optimize` | off | Remove internal/hidden paths |
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--output`, `-o` | Output STL file path | `<input>.stl` |
+| `--optimize` | Enable removal of internal paths | Disabled |
+| `--nozzle-diameter` | Printer nozzle diameter (mm) | 0.4 |
+| `--layer-height` | Layer height (mm) | 0.2 |
+| `--filament-diameter` | Filament diameter (mm) | 1.75 |
+| `--mesh-sides` | Resolution of the tube mesh (4-16 recommended) | 8 |
 
-### Examples
+## WebAssembly (WASM)
+
+This project can be compiled to WASM for use in web applications.
+
+1.  Install `wasm-pack`: https://rustwasm.github.io/wasm-pack/installer/
+2.  Build for web:
+    ```bash
+    wasm-pack build --target web
+    ```
+3.  The output will be in the `pkg` directory, ready to be imported into your JavaScript app.
+
+## Development
+
+### Benchmarking
+
+To test the performance of the optimization algorithms:
 
 ```bash
-# Standard 0.4mm nozzle
-gcodedecoder Benchy.gcode --optimize
-
-# Large 0.8mm nozzle with thick layers
-gcodedecoder input.gcode --nozzle-diameter 0.8 --layer-height 0.3
-
-# High quality mesh (16 sides per tube)
-gcodedecoder input.gcode --mesh-sides 16
-
-# 2.85mm filament (Prusa, Ultimaker)
-gcodedecoder input.gcode --filament-diameter 2.85
+cargo run --release --bin benchmark
 ```
 
-## WASM API
-
-```javascript
-// Default configuration
-const stlBuffer = convert_gcode_to_stl(gcodeString);
-
-// Custom configuration
-const stlBuffer = convert_gcode_to_stl_with_config(
-  gcodeString,
-  0.4,   // nozzle_diameter
-  0.2,   // layer_height  
-  1.75,  // filament_diameter
-  8      // mesh_sides
-);
-```
-
-## How It Works
-
-1. **Parse** - G-code commands are parsed into move instructions
-2. **Process** - Extrusion moves are converted to path segments with width/height
-3. **Generate** - Tube mesh geometry is created around each path
-4. **Optimize** (optional) - Internal paths are culled via voxel flood-fill
-5. **Export** - Binary STL is written
-
-## Derived Parameters
-
-The following values are automatically calculated from nozzle diameter:
-
-| Parameter | Formula | Example (0.4mm nozzle) |
-|-----------|---------|------------------------|
-| Min layer height | nozzle × 0.1 | 0.04mm |
-| Max layer height | nozzle × 0.75 | 0.3mm |
-| Voxel size | nozzle | 0.4mm |
 
 ## License
 
-MIT
+[MIT License](LICENSE)

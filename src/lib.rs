@@ -5,6 +5,7 @@ pub mod geometry;
 pub mod export;
 pub mod optimizer;
 
+
 use wasm_bindgen::prelude::*;
 use config::{Config, ConfigBuilder};
 use processor::GCodeProcessor;

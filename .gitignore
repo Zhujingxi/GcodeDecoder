@@ -2,3 +2,4 @@
 
 *.gcode
 *.stl
+.DS_Store
