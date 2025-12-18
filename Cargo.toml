@@ -12,6 +12,11 @@ anyhow = "1.0.100"
 byteorder = "1.5.0"
 clap = { version = "4.5.53", features = ["derive"] }
 console_error_panic_hook = "0.1.7"
-glam = { version = "0.30.9", features = ["bytemuck"] }
+glam = { version = "0.30.9", features = ["bytemuck", "fast-math"] }
 rayon = "1.11.0"
 wasm-bindgen = "0.2.106"
+
+[profile.release]
+lto = "thin"
+opt-level = 3
+codegen-units = 1

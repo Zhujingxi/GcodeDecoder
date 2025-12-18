@@ -43,7 +43,8 @@ impl GCodeProcessor {
     }
 
     pub fn process(&mut self, lines: &[GCodeLine]) -> Vec<ExtrusionPath> {
-        let mut paths = Vec::new();
+        // Pre-allocate: estimate ~1 path per 20 G-code lines
+        let mut paths = Vec::with_capacity(lines.len() / 20 + 1);
 
         for line in lines {
             match line.command.as_str() {

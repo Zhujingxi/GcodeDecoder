@@ -24,10 +24,13 @@ pub fn generate_mesh(paths: &[ExtrusionPath]) -> Vec<Triangle> {
 
     // Helper closure to process one path
     let process_path = |path: &ExtrusionPath| -> Vec<Triangle> {
-        let mut local_triangles = Vec::new();
         if path.nodes.len() < 2 {
-            return local_triangles;
+            return Vec::new();
         }
+        
+        // Pre-allocate: (nodes-1) segments * num_sides quads * 2 tris + 2 caps * num_sides tris
+        let estimated_tris = (path.nodes.len() - 1) * num_sides * 2 + num_sides * 2;
+        let mut local_triangles = Vec::with_capacity(estimated_tris);
 
         // We generate a ring of vertices for each node in the path.
         let mut rings: Vec<Vec<Vec3>> = Vec::with_capacity(path.nodes.len());
@@ -143,6 +146,7 @@ pub fn generate_mesh(paths: &[ExtrusionPath]) -> Vec<Triangle> {
     }
 }
 
+#[inline(always)]
 fn add_quad(triangles: &mut Vec<Triangle>, p1: Vec3, p2: Vec3, p3: Vec3, p4: Vec3) {
     // p1, p2, p3, p4 in CCW order
     // Tri 1: p1, p2, p3
