@@ -3,3 +3,4 @@
 *.gcode
 *.stl
 .DS_Store
+.worktrees/
