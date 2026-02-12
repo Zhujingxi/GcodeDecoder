@@ -73,8 +73,10 @@ impl App {
                 .unwrap_or_else(|| std::time::Duration::from_secs(0));
 
             if crossterm::event::poll(timeout)? {
-                let action = handle_event(&self.state, self.focused_field)?;
-                self.handle_action(action)?;
+                if let Ok(event) = crossterm::event::read() {
+                    let action = handle_event(event, &self.state, self.focused_field);
+                    self.handle_action(action)?;
+                }
             }
 
             if last_tick.elapsed() >= tick_rate {

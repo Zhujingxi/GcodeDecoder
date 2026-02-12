@@ -1,5 +1,4 @@
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use std::time::Duration;
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 use crate::tui::{AppState, Field};
 
@@ -18,13 +17,11 @@ pub enum Action {
     None,
 }
 
-pub fn handle_event(state: &AppState, focused_field: Field) -> anyhow::Result<Action> {
-    if event::poll(Duration::from_millis(50))? {
-        if let Event::Key(key) = event::read()? {
-            return Ok(map_key_to_action(key, state, focused_field));
-        }
+pub fn handle_event(event: Event, state: &AppState, focused_field: Field) -> Action {
+    if let Event::Key(key) = event {
+        return map_key_to_action(key, state, focused_field);
     }
-    Ok(Action::None)
+    Action::None
 }
 
 fn map_key_to_action(key: KeyEvent, state: &AppState, focused_field: Field) -> Action {
