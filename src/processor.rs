@@ -17,18 +17,18 @@ pub struct PathNode {
 pub struct GCodeProcessor {
     current_pos: Vec3,
     current_e: f32,
-    
+
     // Modes
     relative_positioning: bool, // G91
-    relative_extrusion: bool, // M83
-    
+    relative_extrusion: bool,   // M83
+
     // Config parameters (from Config)
     default_width: f32,
     default_height: f32,
     filament_diameter: f32,
     min_layer_height: f32,
     max_layer_height: f32,
-    
+
     // State for path building
     current_path: Option<ExtrusionPath>,
     first_extrusion_handled: bool,
@@ -109,19 +109,35 @@ impl GCodeProcessor {
         for (param, val) in &line.params {
             match param {
                 'X' => {
-                    if self.relative_positioning { target_pos.x += val } else { target_pos.x = *val }
+                    if self.relative_positioning {
+                        target_pos.x += val
+                    } else {
+                        target_pos.x = *val
+                    }
                     has_move = true;
                 }
                 'Y' => {
-                    if self.relative_positioning { target_pos.y += val } else { target_pos.y = *val }
+                    if self.relative_positioning {
+                        target_pos.y += val
+                    } else {
+                        target_pos.y = *val
+                    }
                     has_move = true;
                 }
                 'Z' => {
-                    if self.relative_positioning { target_pos.z += val } else { target_pos.z = *val }
+                    if self.relative_positioning {
+                        target_pos.z += val
+                    } else {
+                        target_pos.z = *val
+                    }
                     has_move = true;
                 }
                 'E' => {
-                    if self.relative_extrusion { target_e += val } else { target_e = *val }
+                    if self.relative_extrusion {
+                        target_e += val
+                    } else {
+                        target_e = *val
+                    }
                     has_extrude = true;
                 }
                 _ => {}
@@ -129,13 +145,15 @@ impl GCodeProcessor {
         }
 
         let is_extruding = has_extrude && target_e > self.current_e;
-        
+
         // Adaptive Layer Height Logic
         // If this is the FIRST extrusion, set the default height to the current Z level.
         // This handles cases where the first layer is 0.1, 0.24, 0.3 but we default to 0.2.
         if is_extruding && !self.first_extrusion_handled {
             // Check if current Z is reasonable for a layer height (derived from nozzle diameter)
-            if self.current_pos.z > self.min_layer_height && self.current_pos.z < self.max_layer_height {
+            if self.current_pos.z > self.min_layer_height
+                && self.current_pos.z < self.max_layer_height
+            {
                 self.default_height = self.current_pos.z;
                 // println!("Adjusted base layer height to: {}", self.default_height); // Debug
             }
@@ -150,20 +168,20 @@ impl GCodeProcessor {
         if is_extruding && has_move {
             let dist = target_pos.distance(self.current_pos);
             let extrude_amount = target_e - self.current_e;
-            
+
             // Try to use momentary Z height if it looks like a layer height?
-            // Actually, simply using the detected default_height is safer than trusting Z-pos 
-            // because of Z-hops. 
+            // Actually, simply using the detected default_height is safer than trusting Z-pos
+            // because of Z-hops.
             // Ideally we tracked Z-per-layer, but for now fixed first layer detection handles the "Bottom Layer" user issue.
 
             if dist > 0.0001 && extrude_amount > 0.0 {
-                 // Volumetric Calculation
-                 // Filament Volume = PI * r^2 * length
-                 let r = self.filament_diameter / 2.0;
-                 let vol_in = std::f32::consts::PI * r * r * extrude_amount;
-                 
-                 // Line Volume = Width * Height * Distance 
-                 segment_width = vol_in / (segment_height * dist);
+                // Volumetric Calculation
+                // Filament Volume = PI * r^2 * length
+                let r = self.filament_diameter / 2.0;
+                let vol_in = std::f32::consts::PI * r * r * extrude_amount;
+
+                // Line Volume = Width * Height * Distance
+                segment_width = vol_in / (segment_height * dist);
             }
         }
 
@@ -174,16 +192,16 @@ impl GCodeProcessor {
                     self.current_path = Some(ExtrusionPath {
                         nodes: vec![PathNode {
                             pos: self.current_pos,
-                            width: segment_width, // Start node width? 
+                            width: segment_width, // Start node width?
                             // Using the segment width for the start node is a reasonable approximation for the first segment
                             height: segment_height,
-                        }]
+                        }],
                     });
                 }
-                
+
                 // Add the target point
                 if let Some(ref mut path) = self.current_path {
-                     path.nodes.push(PathNode {
+                    path.nodes.push(PathNode {
                         pos: target_pos,
                         width: segment_width,
                         height: segment_height,
@@ -193,10 +211,10 @@ impl GCodeProcessor {
                 // Travel move: finish current path and do NOT start a new one (until we extrude again)
                 self.finish_path(paths);
             }
-            
+
             self.current_pos = target_pos;
         }
-        
+
         if has_extrude {
             self.current_e = target_e;
         }

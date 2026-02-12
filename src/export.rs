@@ -1,12 +1,12 @@
 use crate::geometry::Triangle;
 use anyhow::Result;
-use std::io::{Write, BufWriter};
-use byteorder::{WriteBytesExt, LittleEndian};
+use byteorder::{LittleEndian, WriteBytesExt};
+use std::io::{BufWriter, Write};
 
 pub fn write_stl<W: Write>(writer: &mut W, triangles: &[Triangle]) -> Result<()> {
     // Wrap in BufWriter for better I/O performance (64KB buffer)
     let mut buf = BufWriter::with_capacity(64 * 1024, writer);
-    
+
     // 80 bytes header
     let header = [0u8; 80];
     buf.write_all(&header)?;
