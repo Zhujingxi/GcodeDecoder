@@ -4,7 +4,6 @@ pub mod event;
 pub mod preview_panel;
 pub mod ui;
 
-use crate::config::Config;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

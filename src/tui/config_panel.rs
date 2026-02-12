@@ -1,4 +1,4 @@
-use crate::config::{Config, ConfigBuilder};
+use crate::config::Config;
 
 #[derive(Debug, Clone)]
 pub struct ConfigPanel {

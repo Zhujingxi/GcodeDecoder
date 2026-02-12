@@ -1,5 +1,6 @@
 use std::io;
 use std::path::PathBuf;
+use std::sync::mpsc;
 
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
@@ -15,7 +16,7 @@ use crate::tui::{
     config_panel::ConfigPanel,
     event::{handle_event, Action},
     preview_panel::PreviewPanel,
-    ui, AppState, Field, FileInfo,
+    ui, AppState, Field,
 };
 use crate::{export, geometry, parser, processor};
 
@@ -26,6 +27,7 @@ pub struct App {
     pub focused_field: Field,
     pub input_path: PathBuf,
     pub should_quit: bool,
+    pub conversion_receiver: Option<mpsc::Receiver<anyhow::Result<PathBuf>>>,
 }
 
 impl App {
@@ -40,6 +42,7 @@ impl App {
             focused_field: Field::NozzleDiameter,
             input_path,
             should_quit: false,
+            conversion_receiver: None,
         })
     }
 
@@ -164,9 +167,12 @@ impl App {
         let config = self.config_panel.config.clone();
         let input_path = self.input_path.clone();
 
+        let (tx, rx) = mpsc::channel();
+        self.conversion_receiver = Some(rx);
+
         std::thread::spawn(move || {
             let result = Self::process_conversion(content, config, input_path);
-            result
+            let _ = tx.send(result);
         });
 
         self.state = AppState::Processing { progress: 0.5 };
@@ -204,14 +210,29 @@ impl App {
     }
 
     fn on_tick(&mut self) {
-        if let AppState::Processing { progress } = self.state {
-            if progress >= 1.0 {
-                let output_path = {
-                    let mut p = self.input_path.clone();
-                    p.set_extension("stl");
-                    p
-                };
-                self.state = AppState::Complete { output_path };
+        if let AppState::Processing { progress: _ } = self.state {
+            if let Some(ref receiver) = self.conversion_receiver {
+                match receiver.try_recv() {
+                    Ok(Ok(output_path)) => {
+                        self.state = AppState::Complete { output_path };
+                        self.conversion_receiver = None;
+                    }
+                    Ok(Err(e)) => {
+                        self.state = AppState::Error {
+                            message: format!("Conversion failed: {}", e),
+                        };
+                        self.conversion_receiver = None;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {
+                        // Still processing, keep waiting
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.state = AppState::Error {
+                            message: "Conversion thread panicked".to_string(),
+                        };
+                        self.conversion_receiver = None;
+                    }
+                }
             }
         }
     }

@@ -25,6 +25,7 @@ lto = "thin"
 opt-level = 3
 codegen-units = 1
 
-[[bin]]
+[[bench]]
 name = "benchmark"
 path = "benches/benchmark.rs"
+harness = false
