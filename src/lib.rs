@@ -1,14 +1,16 @@
 pub mod config;
+pub mod export;
+pub mod geometry;
+pub mod optimizer;
 pub mod parser;
 pub mod processor;
-pub mod geometry;
-pub mod export;
-pub mod optimizer;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tui;
 
-use wasm_bindgen::prelude::*;
 use config::{Config, ConfigBuilder};
 use processor::GCodeProcessor;
+use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub fn set_panic_hook() {
@@ -22,7 +24,7 @@ pub fn convert_gcode_to_stl(gcode: &str) -> Result<Vec<u8>, JsValue> {
 }
 
 /// Convert G-code to STL with custom configuration
-/// 
+///
 /// Parameters:
 /// - gcode: G-code content as string
 /// - nozzle_diameter: Nozzle diameter in mm (e.g., 0.4)
@@ -43,24 +45,23 @@ pub fn convert_gcode_to_stl_with_config(
         .filament_diameter(filament_diameter)
         .mesh_sides(mesh_sides)
         .build();
-    
+
     convert_gcode_to_stl_with_config_internal(gcode, &config)
 }
 
-fn convert_gcode_to_stl_with_config_internal(gcode: &str, config: &Config) -> Result<Vec<u8>, JsValue> {
-    let segments = parser::parse_gcode(gcode)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        
+fn convert_gcode_to_stl_with_config_internal(
+    gcode: &str,
+    config: &Config,
+) -> Result<Vec<u8>, JsValue> {
+    let segments = parser::parse_gcode(gcode).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
     let mut processor = GCodeProcessor::with_config(config);
     let processed_segments = processor.process(&segments);
-    
+
     let mesh = geometry::generate_mesh(&processed_segments, config);
-    
+
     let mut buffer = Vec::new();
-    export::write_stl(&mut buffer, &mesh)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        
+    export::write_stl(&mut buffer, &mesh).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
     Ok(buffer)
 }
-
-

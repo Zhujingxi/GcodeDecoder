@@ -13,7 +13,9 @@ anyhow = "1.0.100"
 byteorder = "1.5.0"
 clap = { version = "4.5.53", features = ["derive"] }
 console_error_panic_hook = "0.1.7"
+crossterm = "0.28"
 glam = { version = "0.30.9", features = ["bytemuck", "fast-math"] }
+ratatui = "0.29"
 rayon = "1.11.0"
 wasm-bindgen = "0.2.106"
 

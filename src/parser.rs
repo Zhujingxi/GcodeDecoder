@@ -31,7 +31,7 @@ fn parse_line(line: &str) -> Option<GCodeLine> {
 
     if content.is_empty() {
         if comment.is_some() {
-             return Some(GCodeLine {
+            return Some(GCodeLine {
                 command: String::new(),
                 params: Vec::new(),
                 comment,
@@ -49,35 +49,35 @@ fn parse_line(line: &str) -> Option<GCodeLine> {
 
     let mut parts = content.split_whitespace();
     let command = parts.next()?.to_string(); // e.g. "G1"
-    
+
     // Check if command is actually a command (starts with letter)
     if !command.chars().next().unwrap_or(' ').is_alphabetic() {
         return None; // Invalid or empty
     }
 
     let mut params = Vec::new();
-    
+
     // Handle the rest of the parts
     for part in parts {
         if let Some(c) = part.chars().next() {
-             if c.is_alphabetic() {
-                 // Try to parse the rest as float
-                 if let Ok(val) = part[1..].parse::<f32>() {
-                     params.push((c.to_ascii_uppercase(), val));
-                 }
-             }
+            if c.is_alphabetic() {
+                // Try to parse the rest as float
+                if let Ok(val) = part[1..].parse::<f32>() {
+                    params.push((c.to_ascii_uppercase(), val));
+                }
+            }
         }
     }
-    
+
     // Handle the case where params are stuck to command or each other: "G1X10"
     // For the initial MVP, let's assume standard slicing output which usually has spaces.
     // If the user needs to handle "G1X10Y10", we will need a more complex parser.
     // Given the request for "high performance", we can iterate chars.
-    
+
     if params.is_empty() && content.len() > command.len() {
-         // Fallback or detailed check?
-         // Let's stick to the split_whitespace for now as most slicers output spaces.
-         // If we see issues, we upgrade this function.
+        // Fallback or detailed check?
+        // Let's stick to the split_whitespace for now as most slicers output spaces.
+        // If we see issues, we upgrade this function.
     }
 
     Some(GCodeLine {

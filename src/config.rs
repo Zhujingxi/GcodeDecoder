@@ -36,6 +36,12 @@ pub struct Config {
     pub mesh_sides: usize,
 
     // ─────────────────────────────────────────────────────────────
+    // Processing Options
+    // ─────────────────────────────────────────────────────────────
+    /// Remove internal geometry (default: false)
+    pub remove_internal: bool,
+
+    // ─────────────────────────────────────────────────────────────
     // Optimizer Settings
     // ─────────────────────────────────────────────────────────────
     /// Voxel size modifier relative to nozzle diameter (default: 0.5)
@@ -83,6 +89,7 @@ impl Default for Config {
             layer_height: Self::DEFAULT_LAYER_HEIGHT,
             filament_diameter: Self::DEFAULT_FILAMENT_DIAMETER,
             mesh_sides: Self::DEFAULT_MESH_SIDES,
+            remove_internal: false,
             voxel_size_modifier: Self::DEFAULT_VOXEL_SIZE_MODIFIER,
             padding_factor: Self::DEFAULT_PADDING_FACTOR,
             max_grid_dim: Self::DEFAULT_MAX_GRID_DIM,
@@ -107,6 +114,7 @@ impl Config {
             layer_height,
             filament_diameter,
             mesh_sides,
+            remove_internal: false,
             ..Default::default()
         }
     }
@@ -192,6 +200,11 @@ impl ConfigBuilder {
         self
     }
 
+    pub fn remove_internal(mut self, value: bool) -> Self {
+        self.0.remove_internal = value;
+        self
+    }
+
     // ─────────────────────────────────────────────────────────────
     // Optimizer Settings
     // ─────────────────────────────────────────────────────────────
@@ -262,10 +275,10 @@ mod tests {
     #[test]
     fn test_derived_values() {
         let config = Config::new(0.8, 0.3, 1.75, 16);
-        
+
         // Check computed values scale with nozzle diameter
-        assert!((config.min_layer_height() - 0.08).abs() < 0.001);  // 0.8 * 0.1
-        assert!((config.max_layer_height() - 0.6).abs() < 0.001);   // 0.8 * 0.75
+        assert!((config.min_layer_height() - 0.08).abs() < 0.001); // 0.8 * 0.1
+        assert!((config.max_layer_height() - 0.6).abs() < 0.001); // 0.8 * 0.75
         assert!((config.voxel_size() - 0.4).abs() < 0.001); // 0.8 * 0.5 default modifier
         assert_eq!(config.mesh_sides, 16);
     }
@@ -278,7 +291,7 @@ mod tests {
             .mesh_sides(4)
             .padding_factor(5.0)
             .build();
-        
+
         assert_eq!(config.nozzle_diameter, 0.6);
         assert_eq!(config.layer_height, 0.25);
         assert_eq!(config.mesh_sides, 4);
