@@ -1,12 +1,8 @@
 pub mod config;
 pub mod export;
 pub mod geometry;
-pub mod optimizer;
 pub mod parser;
 pub mod processor;
-
-#[cfg(not(target_arch = "wasm32"))]
-pub mod tui;
 
 use config::{Config, ConfigBuilder};
 use processor::GCodeProcessor;

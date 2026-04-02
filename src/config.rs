@@ -36,26 +36,6 @@ pub struct Config {
     pub mesh_sides: usize,
 
     // ─────────────────────────────────────────────────────────────
-    // Processing Options
-    // ─────────────────────────────────────────────────────────────
-    /// Remove internal geometry (default: false)
-    pub remove_internal: bool,
-
-    // ─────────────────────────────────────────────────────────────
-    // Optimizer Settings
-    // ─────────────────────────────────────────────────────────────
-    /// Voxel size modifier relative to nozzle diameter (default: 0.5)
-    pub voxel_size_modifier: f32,
-    /// Bounding box padding factor (multiplier of voxel size, default: 3.0)
-    pub padding_factor: f32,
-    /// Maximum grid dimension to prevent OOM (default: 2000)
-    pub max_grid_dim: u32,
-    /// Conservative voxel coverage factor (default: 0.71 ≈ √2/2)
-    pub coverage_factor: f32,
-    /// Visibility check radius multiplier (default: 1.3)
-    pub visibility_radius_mult: f32,
-
-    // ─────────────────────────────────────────────────────────────
     // Geometry Precision
     // ─────────────────────────────────────────────────────────────
     /// Epsilon for direction vector comparisons (default: 0.001)
@@ -73,11 +53,6 @@ impl Config {
     pub const DEFAULT_LAYER_HEIGHT: f32 = 0.2;
     pub const DEFAULT_FILAMENT_DIAMETER: f32 = 1.75;
     pub const DEFAULT_MESH_SIDES: usize = 8;
-    pub const DEFAULT_VOXEL_SIZE_MODIFIER: f32 = 0.5;
-    pub const DEFAULT_PADDING_FACTOR: f32 = 3.0;
-    pub const DEFAULT_MAX_GRID_DIM: u32 = 2000;
-    pub const DEFAULT_COVERAGE_FACTOR: f32 = 0.71;
-    pub const DEFAULT_VISIBILITY_RADIUS_MULT: f32 = 1.3;
     pub const DEFAULT_DIRECTION_EPSILON: f32 = 0.001;
     pub const DEFAULT_UP_VECTOR_EPSILON: f32 = 0.01;
 }
@@ -89,12 +64,6 @@ impl Default for Config {
             layer_height: Self::DEFAULT_LAYER_HEIGHT,
             filament_diameter: Self::DEFAULT_FILAMENT_DIAMETER,
             mesh_sides: Self::DEFAULT_MESH_SIDES,
-            remove_internal: false,
-            voxel_size_modifier: Self::DEFAULT_VOXEL_SIZE_MODIFIER,
-            padding_factor: Self::DEFAULT_PADDING_FACTOR,
-            max_grid_dim: Self::DEFAULT_MAX_GRID_DIM,
-            coverage_factor: Self::DEFAULT_COVERAGE_FACTOR,
-            visibility_radius_mult: Self::DEFAULT_VISIBILITY_RADIUS_MULT,
             direction_epsilon: Self::DEFAULT_DIRECTION_EPSILON,
             up_vector_epsilon: Self::DEFAULT_UP_VECTOR_EPSILON,
         }
@@ -114,7 +83,6 @@ impl Config {
             layer_height,
             filament_diameter,
             mesh_sides,
-            remove_internal: false,
             ..Default::default()
         }
     }
@@ -127,12 +95,6 @@ impl Config {
     // ─────────────────────────────────────────────────────────────
     // Computed Values (derived from other fields)
     // ─────────────────────────────────────────────────────────────
-
-    /// Computed voxel size for optimizer (nozzle_diameter × voxel_size_modifier)
-    #[inline]
-    pub fn voxel_size(&self) -> f32 {
-        self.nozzle_diameter * self.voxel_size_modifier
-    }
 
     /// Minimum detectable layer height (10% of nozzle diameter)
     #[inline]
@@ -200,40 +162,6 @@ impl ConfigBuilder {
         self
     }
 
-    pub fn remove_internal(mut self, value: bool) -> Self {
-        self.0.remove_internal = value;
-        self
-    }
-
-    // ─────────────────────────────────────────────────────────────
-    // Optimizer Settings
-    // ─────────────────────────────────────────────────────────────
-
-    pub fn voxel_size_modifier(mut self, value: f32) -> Self {
-        self.0.voxel_size_modifier = value;
-        self
-    }
-
-    pub fn padding_factor(mut self, value: f32) -> Self {
-        self.0.padding_factor = value;
-        self
-    }
-
-    pub fn max_grid_dim(mut self, value: u32) -> Self {
-        self.0.max_grid_dim = value;
-        self
-    }
-
-    pub fn coverage_factor(mut self, value: f32) -> Self {
-        self.0.coverage_factor = value;
-        self
-    }
-
-    pub fn visibility_radius_mult(mut self, value: f32) -> Self {
-        self.0.visibility_radius_mult = value;
-        self
-    }
-
     // ─────────────────────────────────────────────────────────────
     // Geometry Precision
     // ─────────────────────────────────────────────────────────────
@@ -269,7 +197,6 @@ mod tests {
         assert_eq!(config.layer_height, 0.2);
         assert_eq!(config.filament_diameter, 1.75);
         assert_eq!(config.mesh_sides, Config::DEFAULT_MESH_SIDES);
-        assert_eq!(config.padding_factor, Config::DEFAULT_PADDING_FACTOR);
     }
 
     #[test]
@@ -279,7 +206,6 @@ mod tests {
         // Check computed values scale with nozzle diameter
         assert!((config.min_layer_height() - 0.08).abs() < 0.001); // 0.8 * 0.1
         assert!((config.max_layer_height() - 0.6).abs() < 0.001); // 0.8 * 0.75
-        assert!((config.voxel_size() - 0.4).abs() < 0.001); // 0.8 * 0.5 default modifier
         assert_eq!(config.mesh_sides, 16);
     }
 
@@ -289,12 +215,10 @@ mod tests {
             .nozzle_diameter(0.6)
             .layer_height(0.25)
             .mesh_sides(4)
-            .padding_factor(5.0)
             .build();
 
         assert_eq!(config.nozzle_diameter, 0.6);
         assert_eq!(config.layer_height, 0.25);
         assert_eq!(config.mesh_sides, 4);
-        assert_eq!(config.padding_factor, 5.0);
     }
 }
