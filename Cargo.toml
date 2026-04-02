@@ -8,15 +8,25 @@ default-run = "gcodedecoder"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+gui = ["dep:eframe", "dep:rfd"]
+
 [dependencies]
 anyhow = "1.0.100"
 byteorder = "1.5.0"
 clap = { version = "4.5.53", features = ["derive"] }
 console_error_panic_hook = "0.1.7"
+eframe = { version = "0.29", optional = true }
 glam = { version = "0.30.9", features = ["bytemuck", "fast-math"] }
 rayon = "1.11.0"
+rfd = { version = "0.15", optional = true }
 wasm-bindgen = "0.2.106"
 
+[[bin]]
+name = "gcodedecoder-gui"
+path = "src/bin/gui.rs"
+required-features = ["gui"]
 
 [profile.release]
 lto = "thin"
